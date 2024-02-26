@@ -1,75 +1,80 @@
-[![daily e2e tests for libvirt](https://github.com/confidential-containers/cloud-api-adaptor/actions/workflows/daily-e2e-tests-libvirt.yaml/badge.svg)](https://github.com/confidential-containers/cloud-api-adaptor/actions/workflows/daily-e2e-tests-libvirt.yaml)
+# peerpod-ctrl
+The PeerPod CR is used to track the cloud provider resources for a (peer)Pod; it requires the cloud InstanceID and the CloudProvider. PeerPod objects are owned by the matching Pod object.
+The PeerPod controller is watching PeerPod events and deleting dangling resources that were not deleted by the cloud-api-adaptor at Pod deletion time.
 
-# Introduction
+## Description
+### Creation time:
+With every successful VM creation for a Pod, cloud-api-adaptor will create a PeePod CR (predefined by the operator) which contains the VM instance id and cloud provider.
 
-This repository contains the implementation of Kata [remote hypervisor](https://github.com/kata-containers/kata-containers/tree/CCv0).
-Kata remote hypervisor enables creation of Kata VMs on any environment without requiring baremetal servers or nested
-virtualization support.
+### Owner references:
+The PeerPod CR is owned by the original Pod object. Upon Pod deletion [background cascading deletion](https://kubernetes.io/docs/concepts/architecture/garbage-collection/#background-deletion) gets into action and hence the Pod will be deleted first, followed by GC handling the owned PeerPod CR.
 
-## Goals
+### Deletion time:
+Normal case: When remote hypervisor will get the stopVM request (upon Pod deletion) it will delete the pod VM instance and if it succeeds it will remove the finalizer attached to the owned PeerPod object so it can then be cleaned by the GC.
 
-* Accept requests from Kata shim to create/delete Kata VM instances without requiring nested virtualization support.
-* Manage VM instances in the cloud to run pods using cloud (virtualization) provider APIs
-* Forward communication between kata shim on a worker node VM and kata agent on a pod VM
-* Provide a mechanism to establish a network tunnel between a worker and pod VMs to Kubernetes pod network
+Failure case: If for any reason cloud-api-adaptor doesn’t honor the delete request or it fails to perform deletion, the finalizer is not removed. Hence, when PeerPod controller gets a delete event for the owned PeerPod object by the GC and it still has the finalizer, it will comprehend that it needs to perform the deletion of pod VM resource by itself, based on the PeerPod CR fields.
 
-## Architecture
+## Getting Started
+You’ll need a Kubernetes cluster on a [supported provider](https://github.com/confidential-containers/cloud-api-adaptor/README.md#supported-providers) to run against (e.g. you can use [Libvirt for development](https://github.com/confidential-containers/cloud-api-adaptor/libvirt)).
+**Note:** Your controller will automatically use the current context in your kubeconfig file (i.e. whatever cluster `kubectl cluster-info` shows).
 
-The background and description of the components involved in 'peer pods' can be found in the [architecture documentation](./docs/architecture.md).
+### Running on the cluster
+Make sure to [install cloud-api-adaptor](https://github.com/confidential-containers/cloud-api-adaptor/install/README.md) first
+```sh
+make deploy
+```
+**Note:** alternatively you can deploy the peerpod-ctrl along with [cloud-api-adaptor installtion](https://github.com/confidential-containers/cloud-api-adaptor/install/README.md) by setting `RESOURCE_CTRL=true`
 
-## Components
+### Uninstall CRDs
+To delete the CRDs from the cluster:
 
-* Cloud API adaptor ([cmd/cloud-api-adaptor](./cmd/cloud-api-adaptor)) - `cloud-api-adator` implements the remote hypervisor support.
-* Agent protocol forwarder ([cmd/agent-protocol-forwarder](./cmd/agent-protocol-forwarder))
-
-## Installation
-
-Please refer to the instructions mentioned in the following [doc](install/README.md).
-
-## Supported Providers
-
-* aws
-* azure
-* ibmcloud
-* libvirt
-* vsphere
-
-### Adding a new provider
-
-Please refer to the instructions mentioned in the following [doc](./docs/addnewprovider.md).
-
-## Cloud Provider VM Image
-
-A custom VM image, which contains the required components, must be available in your cloud provider's image catalogue. You can find detailed instructions for
-each provider in their respective directories. You can also find further information in the podvm [README.md](./podvm/README.md) about how to build your own
-image using Docker to build the required components and create the image.
-
-> At time of writing the project is moving towards using [mkosi](https://github.com/systemd/mkosi) as our build approach, more information on this can be found
-> in the podvm-mkosi [README.md](./podvm-mkosi/README.md).
-
-### VM Image Build Quick Start
-
-To create a QCOW2 image which can be imported into your provider of choice, you can use the following command.
-
-```bash
-# default ubuntu based, x86 architecture image
-make podvm-builder podvm-binaries podvm-image
-# or to produce an s390x architecture image
-ARCH=s390x make podvm-builder podvm-binaries podvm-image
-# or to produce a rhel distribution image
-PODVM_DISTRO=rhel make podvm-builder podvm-binaries podvm-image
+```sh
+make uninstall
 ```
 
-> N.B. This will populate the image using the component versions found in [versions.yaml](./versions.yaml).
+### Undeploy controller
+UnDeploy the controller to the cluster:
 
-You can find provider specific instructions on how to import the QCOW2 image for each cloud provider in their respective directories.
+```sh
+make undeploy
+```
 
-## Contribution
+## Contributing
+For any changes in the CRD/controller make sure it doesn't break the k8s api calls from the [cloud-api-adaptor](../) and adapt it if needed.
 
-This project uses [the Apache 2.0 license](./LICENSE). Contribution to this project requires the [DCO 1.1](./DCO1.1.txt) process to be followed.
+### How it works
+This project aims to follow the Kubernetes [Operator pattern](https://kubernetes.io/docs/concepts/extend-kubernetes/operator/)
 
-## Collaborations
+It uses [Controllers](https://kubernetes.io/docs/concepts/architecture/controller/) 
+which provides a reconcile function responsible for synchronizing resources untile the desired state is reached on the cluster 
 
-* Slack: [#confidential-containers-peerpod](https://cloud-native.slack.com/archives/C04A2EJ70BX) in [CNCF](https://communityinviter.com/apps/cloud-native/cncf)
-* Zoom meeting: https://zoom.us/j/94601737867?pwd=MEF5NkN5ZkRDcUtCV09SQllMWWtzUT09
-    * 14:00 - 15:00 UTC on each `Wednesday`
+### Test It Out
+#### Running custom build
+1. Install Instances of Custom Resources:
+
+```sh
+kubectl apply -f config/samples/
+```
+
+2. Build and push your image to the location specified by `IMG`:
+
+```sh
+make docker-build docker-push IMG=<some-registry>/peerpod-ctrl:tag
+```
+
+3. Deploy the controller to the cluster with the image specified by `IMG`:
+
+```sh
+make deploy IMG=<some-registry>/peerpod-ctrl:tag
+```
+
+### Modifying the API definitions
+If you are editing the API definitions, generate the manifests such as CRs or CRDs using:
+
+```sh
+make manifests
+```
+
+**NOTE:** Run `make --help` for more information on all potential `make` targets
+
+More information can be found via the [Kubebuilder Documentation](https://book.kubebuilder.io/introduction.html)
