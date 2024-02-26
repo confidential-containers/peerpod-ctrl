@@ -1,44 +1,38 @@
-ARG BUILD_TYPE=dev
-ARG BUILDER_BASE=quay.io/confidential-containers/golang-fedora:1.20.12-38
-ARG BASE=registry.fedoraproject.org/fedora:38
-
-# This dockerfile uses Go cross-compilation to build the binary,
-# we build on the host platform ($BUILDPLATFORM) and then copy the
-# binary into the container image of the target platform ($TARGETPLATFORM)
-# that was specified with --platform. For more details see:
-# https://www.docker.com/blog/faster-multi-platform-builds-dockerfile-cross-compilation-guide/
-FROM --platform=$BUILDPLATFORM $BUILDER_BASE as builder-release
-# For `dev` builds due to CGO constraints we have to emulate the target platform
-# instead of using Go's cross-compilation
-FROM --platform=$TARGETPLATFORM $BUILDER_BASE as builder-dev
-
-RUN dnf install -y libvirt-devel && dnf clean all
-
-FROM builder-${BUILD_TYPE} AS builder
-ARG RELEASE_BUILD
-ARG COMMIT
-ARG VERSION
+# Build the manager binary
+FROM --platform=$TARGETPLATFORM quay.io/confidential-containers/golang-fedora:1.20.8-38 as builder
+ARG TARGETOS
 ARG TARGETARCH
-ARG YQ_VERSION
+ARG CGO_ENABLED=1
+ARG GOFLAGS
 
-RUN go install github.com/mikefarah/yq/v4@$YQ_VERSION
-
-WORKDIR /work
-COPY go.mod go.sum ./
-COPY provider/go.mod provider/go.sum ./provider/
+WORKDIR /workspace
+RUN if [ "$CGO_ENABLED" = 1 ] ; then dnf install -y libvirt-devel && dnf clean all; fi
+# Copy the Go Modules manifests
+COPY go.mod go.mod
+COPY go.sum go.sum
+# cache deps before building and copying source so that we don't need to re-download as much
+# and so that source changes don't invalidate our downloaded layer
 RUN go mod download
-COPY entrypoint.sh Makefile Makefile.defaults versions.yaml ./
-COPY cmd   ./cmd
-COPY pkg   ./pkg
-COPY proto ./proto
-COPY provider ./provider
-RUN CC=gcc make ARCH=$TARGETARCH COMMIT=$COMMIT VERSION=$VERSION RELEASE_BUILD=$RELEASE_BUILD cloud-api-adaptor
 
-FROM --platform=$TARGETPLATFORM $BASE as base-release
+# Copy the go source
+COPY main.go main.go
+COPY api/ api/
+COPY controllers/ controllers/
 
-FROM base-release as base-dev
-RUN dnf install -y libvirt-libs /usr/bin/ssh && dnf clean all
+# Build
+# the GOARCH has not a default value to allow the binary be built according to the host where the command
+# was called. For example, if we call make docker-build in a local env which has the Apple Silicon M1 SO
+# the docker BUILDPLATFORM arg will be linux/arm64 when for Apple x86 it will be linux/amd64. Therefore,
+# by leaving it empty we can ensure that the container and binary shipped on it will have the same platform.
+# CC=gcc because the cgo compiler will always be gcc in image golang-fedora, even for s390x and ppc64le
+RUN CC=gcc CGO_ENABLED=${CGO_ENABLED} GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build ${GOFLAGS} -a -o manager main.go
 
-FROM base-${BUILD_TYPE}
-COPY --from=builder /work/cloud-api-adaptor /work/entrypoint.sh /usr/local/bin/
-CMD ["entrypoint.sh"]
+# Target Image
+FROM --platform=$TARGETPLATFORM registry.fedoraproject.org/fedora:38
+ARG CGO_ENABLED=1
+
+RUN if [ "$CGO_ENABLED" = 1 ] ; then dnf install -y libvirt-libs openssh-clients && dnf clean all; fi
+WORKDIR /
+COPY --from=builder /workspace/manager .
+
+ENTRYPOINT ["/manager"]
